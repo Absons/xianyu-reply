@@ -88,6 +88,21 @@ class SecureConfirm:
             logger.error("自动确认发货失败，重试次数过多")
             return {"error": "自动确认发货失败，重试次数过多"}
 
+        # 风控冷却期直接跳过，避免持续请求延长风控。
+        # 确认发货失败不影响卡密已发出的结果，冷却结束后可手动补确认。
+        from utils import risk_control
+        guard = risk_control.registry.get(self.cookie_id)
+        if guard.is_blocked:
+            logger.warning(
+                f"【{self.cookie_id}】自动确认发货跳过：风控冷却中，"
+                f"剩余 {guard.remaining_seconds} 秒"
+            )
+            return {
+                "error": f"账号风控冷却中，跳过自动确认发货",
+                "order_id": order_id,
+                "risk_controlled": True,
+            }
+
         # 保存item_id供Token刷新使用
         if item_id:
             self._current_item_id = item_id
@@ -162,6 +177,21 @@ class SecureConfirm:
                 else:
                     error_msg = res_json.get('ret', ['未知错误'])[0] if res_json.get('ret') else '未知错误'
                     logger.warning(f"【{self.cookie_id}】❌ 自动确认发货失败: {error_msg}")
+
+                    # 命中平台风控：熔断并立即停止重试。失败分支原本是不带
+                    # 间隔的直接递归重试，风控场景下这属于最高危的请求风暴。
+                    if risk_control.is_risk_control_error(str(error_msg)):
+                        risk_control.registry.get(self.cookie_id).trip(
+                            f"自动确认发货: {str(error_msg)[:120]}"
+                        )
+                        logger.warning(
+                            f"【{self.cookie_id}】自动确认发货命中平台风控，已熔断并停止重试"
+                        )
+                        return {
+                            "error": f"自动确认发货触发风控: {error_msg}",
+                            "order_id": order_id,
+                            "risk_controlled": True,
+                        }
 
                     return await self.auto_confirm(order_id, item_id, retry_count + 1)
 

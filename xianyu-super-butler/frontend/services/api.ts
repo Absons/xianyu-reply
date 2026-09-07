@@ -796,6 +796,15 @@ export const getSystemSettings = async (): Promise<SystemSettings> => {
     return res.data || res; // handle {success:true, data: {...}} wrapper if exists
 };
 
+/** 拉取 OpenAI 兼容服务的可用模型列表（用于默认模型选择，可手输兜底） */
+export const fetchAvailableModels = async (baseUrl: string, apiKey: string): Promise<string[]> => {
+    const data = await post<{ models: string[] }>('/ai/available-models', {
+        base_url: baseUrl,
+        api_key: apiKey,
+    });
+    return data.models ?? [];
+};
+
 export const updateSystemSettings = async (settings: Partial<SystemSettings>): Promise<ApiResponse> => {
     // API expects individual PUTs, but we'll loop in the service for convenience or assume bulk endpoint if updated
     // Based on docs 12.2, we iterate.

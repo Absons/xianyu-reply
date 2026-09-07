@@ -19,6 +19,7 @@ import {
   changePassword,
   createQuickPhrase,
   deleteQuickPhrase,
+  fetchAvailableModels,
   getQuickPhrases,
   getSystemSettings,
   updateQuickPhrase,
@@ -35,6 +36,9 @@ import {
 } from './ui';
 
 type SettingsSection = 'general' | 'ai' | 'email' | 'phrases' | 'notice';
+
+/** 默认模型的预设候选；datalist 仅作提示，不限制手动输入其他模型名 */
+const DEFAULT_MODEL_PRESETS = ['qwen-plus', 'qwen-turbo', 'gpt-3.5-turbo', 'gpt-4'];
 
 /**
  * 把后端的开关值转成布尔。
@@ -124,6 +128,31 @@ const Settings: React.FC = () => {
 
   const [showApiKey, setShowApiKey] = useState(false);
   const [showSmtpPassword, setShowSmtpPassword] = useState(false);
+
+  // 默认模型：预设 + 从 API 拉取的候选，支持手输（datalist 只做提示不限制）
+  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
+
+  const handleFetchModels = async () => {
+    if (!settings) return;
+    const baseUrl = settings.ai_api_url?.trim();
+    const apiKey = settings.ai_api_key?.trim();
+    if (!baseUrl || !apiKey) {
+      notify('请先填写 API 地址和 API Key', 'warning');
+      return;
+    }
+    setFetchingModels(true);
+    try {
+      const models = await fetchAvailableModels(baseUrl, apiKey);
+      setFetchedModels(models);
+      notify(`获取到 ${models.length} 个模型，点击模型输入框选择`, 'success');
+    } catch (error: any) {
+      const message = error?.response?.data?.detail || error?.message || '获取模型列表失败';
+      notify(typeof message === 'string' ? message : '获取模型列表失败', 'error');
+    } finally {
+      setFetchingModels(false);
+    }
+  };
 
   // 修改登录密码。与页面顶部的「保存设置」互不影响：这里改的是当前账号的凭据，
   // 走的是独立接口，成功后立刻生效。
@@ -636,19 +665,40 @@ const Settings: React.FC = () => {
               </div>
             </label>
 
-            <label>
+            <div>
               <span className="field-label">默认模型</span>
-              <select
-                value={settings.ai_model || 'qwen-plus'}
-                onChange={(event) => setSettings({ ...settings, ai_model: event.target.value })}
-                className="ios-input w-full rounded-md px-3 py-2.5"
-              >
-                <option value="qwen-plus">通义千问 Plus</option>
-                <option value="qwen-turbo">通义千问 Turbo</option>
-                <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
-                <option value="gpt-4">GPT-4</option>
-              </select>
-            </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  list="ai-model-options"
+                  value={settings.ai_model || ''}
+                  onChange={(event) => setSettings({ ...settings, ai_model: event.target.value })}
+                  className="ios-input w-full rounded-md px-3 py-2.5 text-sm"
+                  placeholder="qwen-plus，或点击右侧按钮获取"
+                />
+                <button
+                  type="button"
+                  disabled={fetchingModels}
+                  onClick={handleFetchModels}
+                  className="ios-input flex shrink-0 items-center gap-1.5 rounded-md px-3 py-2.5 text-sm disabled:opacity-60"
+                  title="使用上方 API 地址和 Key 获取可选模型"
+                >
+                  <RefreshCw className={`h-4 w-4 ${fetchingModels ? 'animate-spin' : ''}`} />
+                  获取模型
+                </button>
+              </div>
+              <datalist id="ai-model-options">
+                {DEFAULT_MODEL_PRESETS.map((model) => (
+                  <option key={model} value={model} />
+                ))}
+                {fetchedModels.map((model) => (
+                  <option key={model} value={model} />
+                ))}
+              </datalist>
+              <span className="mt-1 block text-xs text-gray-500">
+                可手动输入任意模型名，或填写 API 地址与 Key 后点击"获取模型"拉取列表。
+              </span>
+            </div>
 
             <label className="lg:col-span-2">
               <span className="field-label">默认自动回复内容</span>

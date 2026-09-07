@@ -6022,6 +6022,51 @@ def get_all_ai_reply_settings(current_user: Dict[str, Any] = Depends(get_current
         raise HTTPException(status_code=500, detail=f"服务器错误: {str(e)}")
 
 
+@app.post("/ai/available-models")
+async def get_available_ai_models(data: dict, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """根据 API 地址和 Key 拉取 OpenAI 兼容服务（/v1/models）返回的模型列表。
+
+    用于系统设置页的默认模型选择：支持手输，也支持一键获取可选模型。
+    """
+    import aiohttp
+
+    base_url = str(data.get('base_url') or '').strip().rstrip('/')
+    api_key = str(data.get('api_key') or '').strip()
+    if not base_url or not api_key:
+        raise HTTPException(status_code=400, detail='请填写 API 地址和 API Key')
+
+    url = f"{base_url}/models"
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+            async with session.get(url, headers={'Authorization': f'Bearer {api_key}'}) as resp:
+                try:
+                    body = await resp.json(content_type=None)
+                except Exception:
+                    body = None
+                if resp.status != 200:
+                    msg = ''
+                    if isinstance(body, dict):
+                        msg = str((body.get('error') or {}).get('message') or body.get('message') or '')
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f'模型接口返回 {resp.status}: {msg or "请检查 API 地址与 Key"}'
+                    )
+        models = []
+        if isinstance(body, dict) and isinstance(body.get('data'), list):
+            for item in body['data']:
+                model_id = item.get('id') if isinstance(item, dict) else item
+                if model_id:
+                    models.append(str(model_id))
+        if not models:
+            raise HTTPException(status_code=502, detail='接口未返回可用模型，请确认服务兼容 OpenAI 协议')
+        return {'models': sorted(set(models))}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取模型列表失败: {e}")
+        raise HTTPException(status_code=502, detail=f'获取模型列表失败: {str(e)}')
+
+
 @app.post("/ai-reply-test/{cookie_id}")
 async def test_ai_reply(cookie_id: str, test_data: dict,
                         current_user: Dict[str, Any] = Depends(get_current_user)):
@@ -8615,7 +8660,7 @@ async def import_orders(
 
 # 定义后端 API 的一级路径。未匹配的 API 路径必须返回 JSON 404，不能回退到 SPA。
 API_ROOTS = {
-    'admin', 'ai-reply-settings', 'ai-reply-test', 'analytics', 'api', 'backup',
+    'admin', 'ai', 'ai-reply-settings', 'ai-reply-test', 'analytics', 'api', 'backup',
     'cards', 'change-admin-password', 'change-password', 'cookie', 'cookies',
     'blacklist', 'debug', 'default-replies', 'delivery-block-rules', 'delivery-rules', 'face-verification',
     'generate-captcha', 'geetest', 'health', 'item-reply', 'itemReplays', 'items',

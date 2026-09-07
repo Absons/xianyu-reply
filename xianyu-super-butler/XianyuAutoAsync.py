@@ -984,6 +984,10 @@ class XianyuLive:
             logger.warning(f"【{self.cookie_id}】买家信用查询缺少 buyer_id 或 Cookie，跳过")
             return -1
 
+        # 风控冷却期直接跳过，避免持续请求延长风控
+        if self._risk_cooling("买家信用查询"):
+            return -1
+
         data_payload = {
             "rateType": 0,
             "ratedUid": str(buyer_id),
@@ -1053,6 +1057,9 @@ class XianyuLive:
                 logger.warning(
                     f"【{self.cookie_id}】买家信用查询失败: buyer_id={buyer_id}, ret={ret_list}"
                 )
+                # 命中风控立即熔断放弃，不做0.5秒级盲重试
+                if self._mtop_risk_hit(ret_list, "买家信用查询"):
+                    return -1
         except Exception as exc:
             logger.warning(
                 f"【{self.cookie_id}】买家信用查询异常（第 {retry_count + 1} 次）: "
@@ -1069,6 +1076,10 @@ class XianyuLive:
         max_retry = 3
         if not order_id or not self.cookies_str:
             logger.warning(f"【{self.cookie_id}】关闭订单缺少 order_id 或 Cookie，跳过")
+            return False
+
+        # 风控冷却期直接跳过，避免持续请求延长风控
+        if self._risk_cooling("关闭订单"):
             return False
 
         data_payload = {
@@ -1128,6 +1139,9 @@ class XianyuLive:
                 f"【{self.cookie_id}】关闭订单失败（第 {retry_count + 1} 次）: "
                 f"order_id={order_id}, ret={ret_list}"
             )
+            # 命中风控立即熔断放弃，不做0.5秒级盲重试
+            if self._mtop_risk_hit(ret_list, "关闭订单"):
+                return False
         except Exception as exc:
             logger.warning(
                 f"【{self.cookie_id}】关闭订单异常（第 {retry_count + 1} 次）: "
@@ -1740,8 +1754,17 @@ class XianyuLive:
                     logger.error(f'[{msg_time}] 【{self.cookie_id}】订单 {order_id} 商品归属不一致，拒绝自动发货')
                     return
                 if current_order.get('buyer_id') and str(current_order.get('buyer_id')) != str(send_user_id):
-                    logger.error(f'[{msg_time}] 【{self.cookie_id}】订单 {order_id} 买家归属不一致，拒绝自动发货')
-                    return
+                    db_buyer = str(current_order.get('buyer_id'))
+                    if db_buyer == 'unknown_user' or db_buyer == str(chat_id):
+                        # 历史消息污染：buyer_id被写成了会话ID或占位符，
+                        # 以消息中的senderUserId为准，不作为拒绝依据
+                        logger.warning(
+                            f'[{msg_time}] 【{self.cookie_id}】订单 {order_id} 记录的买家ID为 {db_buyer}'
+                            f'（会话ID/占位值），以消息中的买家 {send_user_id} 为准'
+                        )
+                    else:
+                        logger.error(f'[{msg_time}] 【{self.cookie_id}】订单 {order_id} 买家归属不一致，拒绝自动发货')
+                        return
 
             order_status = (current_order or {}).get('order_status')
             order_detail = None
@@ -4166,11 +4189,52 @@ class XianyuLive:
             logger.error(f"批量获取商品详情异常: {self._safe_str(e)}")
             return success_count
 
+    def _mtop_risk_hit(self, ret_value, context: str) -> bool:
+        """检查 mtop 接口返回是否命中平台风控，命中则熔断并停止重试。
+
+        实测教训：风控命中后继续按原节奏重试（历史上是 0.5 秒 × 3 次的盲
+        重试）只会延长风控时长。这里统一在识别到特征串后熔断该账号，由调
+        用方立即放弃本次请求，等冷却结束后自然恢复。
+
+        Args:
+            ret_value: 接口返回的 ret 列表或错误文本。
+            context: 调用场景描述，用于日志与熔断原因。
+
+        Returns:
+            True 表示命中风控，调用方应终止重试。
+        """
+        from utils import risk_control
+        if isinstance(ret_value, (list, tuple)):
+            text = '; '.join(str(item) for item in ret_value)
+        else:
+            text = str(ret_value or '')
+        if not risk_control.is_risk_control_error(text):
+            return False
+        risk_control.registry.get(self.cookie_id).trip(f"{context}: {text[:120]}")
+        logger.warning(f"【{self.cookie_id}】{context} 命中平台风控，已熔断并停止重试")
+        return True
+
+    def _risk_cooling(self, context: str) -> bool:
+        """账号处于风控冷却期时跳过主动请求，快速失败。"""
+        from utils import risk_control
+        guard = risk_control.registry.get(self.cookie_id)
+        if guard.is_blocked:
+            logger.info(
+                f"【{self.cookie_id}】{context} 跳过：风控冷却中，"
+                f"剩余 {guard.remaining_seconds} 秒（{guard.last_hit_reason[:60]}）"
+            )
+            return True
+        return False
+
     async def get_item_info(self, item_id, retry_count=0):
         """获取商品信息，自动处理token失效的情况"""
         if retry_count >= 4:  # 最多重试3次
             logger.error("获取商品信息失败，重试次数过多")
             return {"error": "获取商品信息失败，重试次数过多"}
+
+        # 风控冷却期直接跳过，避免持续请求延长风控
+        if self._risk_cooling("商品信息查询"):
+            return {"error": "账号风控冷却中，跳过商品信息查询"}
 
         # 确保session已创建
         if not self.session:
@@ -4241,6 +4305,10 @@ class XianyuLive:
                     if not any('SUCCESS::调用成功' in ret for ret in ret_value):
                         logger.warning(f"商品信息API调用失败，错误信息: {ret_value}")
 
+                        # 命中风控立即熔断放弃，不做0.5秒级盲重试
+                        if self._mtop_risk_hit(ret_value, "商品信息查询"):
+                            return {"error": f"商品信息查询触发风控: {ret_value}"}
+
                         await asyncio.sleep(0.5)
                         return await self.get_item_info(item_id, retry_count + 1)
                     else:
@@ -4259,8 +4327,11 @@ class XianyuLive:
         """从消息中提取商品ID的辅助方法"""
         try:
             # 方法1: 从message["1"]中提取（如果是字符串格式）
+            # 注意：卡片更新类消息的message[1]是形如"1234567890123.PNM"的消息ID，
+            # 不是商品ID，直接用会把订单的item_id污染成消息ID，导致自动发货的
+            # 商品归属校验失败，这里必须排除。
             message_1 = message.get('1')
-            if isinstance(message_1, str):
+            if isinstance(message_1, str) and not message_1.rstrip().endswith('.PNM'):
                 # 尝试从字符串中提取数字ID
                 id_match = re.search(r'(\d{10,})', message_1)
                 if id_match:
@@ -4323,6 +4394,9 @@ class XianyuLive:
                             return result
 
                 elif isinstance(obj, str):
+                    # 跳过PNM消息ID字符串，避免误当商品ID
+                    if obj.rstrip().endswith('.PNM'):
+                        return None
                     # 从字符串中提取可能的商品ID
                     id_match = re.search(r'(\d{10,})', obj)
                     if id_match:
@@ -9924,29 +9998,32 @@ class XianyuLive:
                         temp_item_id = None
 
                         # 提取用户ID
+                        # 注意1：提取失败时保持None而不是"unknown_user"，否则会
+                        # 用假值覆盖订单里已有的正确buyer_id
+                        # 注意2：message['1']为字符串时（形如"xxx@goofish"）是
+                        # 会话/频道ID，不是买家用户ID，不能写入buyer_id，
+                        # 否则自动发货的买家归属校验会误拒
                         try:
                             message_1 = message.get("1")
-                            if isinstance(message_1, str) and '@' in message_1:
-                                temp_user_id = message_1.split('@')[0]
-                            elif isinstance(message_1, dict):
+                            if isinstance(message_1, dict):
                                 # 从字典中提取用户ID
                                 if "10" in message_1 and isinstance(message_1["10"], dict):
-                                    temp_user_id = message_1["10"].get("senderUserId", "unknown_user")
-                                else:
-                                    temp_user_id = "unknown_user"
-                            else:
-                                temp_user_id = "unknown_user"
+                                    temp_user_id = message_1["10"].get("senderUserId") or None
                         except:
-                            temp_user_id = "unknown_user"
+                            pass
 
                         # 提取商品ID
+                        # 注意：仅从可靠的reminderUrl字段或标准聊天消息中提取。
+                        # 卡片/系统类消息结构与聊天消息不同，盲目兜底提取会把
+                        # 消息ID、会话ID当成商品ID，污染订单的item_id，
+                        # 导致自动发货的商品归属校验失败。
                         try:
                             if "1" in message and isinstance(message["1"], dict) and "10" in message["1"] and isinstance(message["1"]["10"], dict):
                                 url_info = message["1"]["10"].get("reminderUrl", "")
                                 if isinstance(url_info, str) and "itemId=" in url_info:
                                     temp_item_id = url_info.split("itemId=")[1].split("&")[0]
 
-                            if not temp_item_id:
+                            if not temp_item_id and self.is_chat_message(message):
                                 temp_item_id = self.extract_item_id_from_message(message)
                         except:
                             pass
@@ -10118,8 +10195,21 @@ class XianyuLive:
             if send_user_id == self.myid:
                 logger.info(f"[{msg_time}] 【手动发出】 商品({item_id}): {send_message}")
 
-                # 暂停该chat_id的自动回复10分钟
-                pause_manager.pause_chat(chat_id, self.cookie_id)
+                # 仅在确实是人工回复时才暂停自动回复。交易完成后闲鱼会自动
+                # 以卖家身份推送"小红花/评价"等系统消息，这类消息若触发
+                # 人工接管暂停，每笔成交后10分钟内买家咨询都无法获得AI回复。
+                manual_text = str(send_message or '').strip()
+                is_system_echo = (
+                    self._is_system_or_order_event(manual_text)
+                    or '小红花' in manual_text
+                    or manual_text.startswith('已求')
+                    or manual_text == '[我完成了评价]'
+                )
+                if is_system_echo:
+                    logger.info(f"[{msg_time}] 【{self.cookie_id}】卖家侧系统消息，不触发人工接管暂停")
+                else:
+                    # 暂停该chat_id的自动回复10分钟
+                    pause_manager.pause_chat(chat_id, self.cookie_id)
 
                 return
             else:
@@ -10948,6 +11038,10 @@ class XianyuLive:
         if not self.session:
             await self.create_session()
 
+        # 风控冷却期直接跳过本轮同步，避免持续请求延长风控
+        if self._risk_cooling("商品列表同步"):
+            return {'error': '账号风控冷却中，跳过商品列表同步'}
+
         def empty_result(group_name='在售', confirmed=False, response_fields=None):
             """一件商品都没有，但这次同步是成功的。
 
@@ -11054,6 +11148,9 @@ class XianyuLive:
                 discovery_ret = discovery_response.get('ret', [])
                 if not discovery_ret or not str(discovery_ret[0]).startswith('SUCCESS::'):
                     error_msg = discovery_ret[0] if discovery_ret else '未知错误'
+                    # 命中风控立即熔断放弃，不做0.5秒级盲重试
+                    if self._mtop_risk_hit(error_msg, "商品列表同步"):
+                        return {'error': f"商品列表同步触发风控: {error_msg}"}
                     if 'TOKEN' in str(error_msg).upper():
                         await asyncio.sleep(0.5)
                         return await self.get_item_list_info(page_number, page_size, retry_count + 1)
