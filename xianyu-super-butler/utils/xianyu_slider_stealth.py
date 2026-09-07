@@ -514,23 +514,43 @@ class XianyuSliderStealth:
                     'height': browser_features['viewport_height'],
                 }
 
-            try:
-                self.context = self.playwright.chromium.launch_persistent_context(
-                    user_data_dir,
-                    channel='chrome',  # 系统安装的正式版 Chrome
-                    headless=self.headless,
-                    args=launch_args,
-                    **context_options,
-                )
-                self.browser = None  # 持久化模式下无独立 browser 句柄
-                logger.info(f"【{self.pure_user_id}】已启动系统 Chrome（持久化目录）")
-            except Exception as chrome_error:
-                # 容器里通常没有系统 Chrome，这条回退才是 Docker/NAS 的实际路径。
+            # 优先顺序：正式版 Chrome → Edge → Playwright 自带 Chromium。
+            # 前两个是带品牌签名的真实浏览器（版本串、插件、Client Hints 与
+            # 市面用户一致）；Chromium（Chrome for Testing）的指纹实测会被
+            # 阿里 nc 识破，连真人手动拖动都判失败 —— 这正是「换台电脑/
+            # Docker 部署就过不了滑块」的根因，所以只作最后的兜底。
+            # Edge 是给没装 Chrome 的 Windows 机器准备的：系统必带，零安装成本。
+            self.context = None
+            self._browser_channel = None
+            last_channel_error = None
+            for channel, channel_label in (('chrome', 'Chrome'), ('msedge', 'Edge')):
+                # 不同品牌浏览器共用一个 profile 目录会互相污染，各用各的
+                channel_dir = user_data_dir if channel == 'chrome' else f"{user_data_dir}_{channel}"
+                os.makedirs(channel_dir, exist_ok=True)
+                self._clean_singleton_lock_files(channel_dir)
+                try:
+                    self.context = self.playwright.chromium.launch_persistent_context(
+                        channel_dir,
+                        channel=channel,
+                        headless=self.headless,
+                        args=launch_args,
+                        **context_options,
+                    )
+                    self._browser_channel = channel
+                    self.browser = None  # 持久化模式下无独立 browser 句柄
+                    logger.info(f"【{self.pure_user_id}】已启动系统{channel_label}（channel={channel}，持久化目录）")
+                    break
+                except Exception as channel_error:
+                    last_channel_error = channel_error
+
+            if self.context is None:
+                # 容器/NAS 里可能连品牌浏览器都没有，这条回退才是最后路径。
                 # 仍用持久化上下文：一次性 context 没有历史 profile，指纹更假。
                 # Patchright 在这里尤其重要 —— 它补上了 Chromium 相对正式版
                 # Chrome 缺失的那部分伪装。
+                chrome_error = last_channel_error or Exception('无可用的品牌浏览器')
                 logger.warning(
-                    f"【{self.pure_user_id}】系统 Chrome 不可用（{chrome_error}），"
+                    f"【{self.pure_user_id}】系统 Chrome/Edge 均不可用（{chrome_error}），"
                     f"回退 Chromium（引擎: {getattr(self, '_stealth_engine', 'playwright')}）"
                 )
                 fallback_options = dict(context_options)
@@ -585,6 +605,30 @@ class XianyuSliderStealth:
             # 添加增强反检测脚本
             logger.info(f"【{self.pure_user_id}】添加反检测脚本...")
             self.page.add_init_script(self._get_stealth_script(browser_features))
+
+            # 无头模式的 UA 泄漏修复：Chromium 无头时 navigator.userAgent 和
+            # 请求头都带 "HeadlessChrome" 字样，是最直白的机器人标志。Xvfb
+            # 正常时走有头模式不受影响；只有回退到无头时才需要这里用 CDP
+            # 覆盖成同一内核版本的标准串（只去掉 Headless 前缀，Client Hints
+            # 与内核版本保持一致，不会产生新的矛盾指纹）。
+            if self.headless:
+                try:
+                    native_ua = self.page.evaluate('navigator.userAgent')
+                    if 'HeadlessChrome' in native_ua:
+                        fixed_ua = native_ua.replace('HeadlessChrome', 'Chrome')
+                        cdp_session = self.context.new_cdp_session(self.page)
+                        cdp_session.send(
+                            'Network.setUserAgentOverride', {'userAgent': fixed_ua}
+                        )
+                        logger.info(
+                            f"【{self.pure_user_id}】已修正无头 UA（去除 HeadlessChrome 标记）"
+                        )
+                except Exception as ua_error:
+                    logger.warning(
+                        f"【{self.pure_user_id}】无头 UA 修正失败（继续运行，"
+                        f"但滑块通过率可能下降）: {ua_error}"
+                    )
+
             logger.info(f"【{self.pure_user_id}】浏览器初始化完成")
             
             return self.page

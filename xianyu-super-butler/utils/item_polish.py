@@ -135,6 +135,7 @@ async def polish_account_items(
         ``{"total", "success", "failed", "details", "cookies_str"}``
     """
     from app.db_manager import db_manager
+    from utils import risk_control
 
     if not cookies_str:
         return {"total": 0, "success": 0, "failed": 0, "details": [], "cookies_str": cookies_str}
@@ -147,12 +148,24 @@ async def polish_account_items(
         logger.info(f"【{cookie_id}】没有可擦亮的商品")
         return {"total": 0, "success": 0, "failed": 0, "details": [], "cookies_str": cookies_str}
 
+    guard = risk_control.registry.get(cookie_id)
     success = 0
     failed = 0
+    aborted_reason = ""
     details: List[Dict[str, Any]] = []
 
     async with aiohttp.ClientSession() as session:
         for index, item_id in enumerate(item_ids):
+            # 命中风控后立即中断整批：擦亮是纯增益操作，
+            # 继续打剩余商品只会延长风控时间。
+            if guard.is_blocked:
+                aborted_reason = (
+                    f"账号风控冷却中，剩余 {guard.remaining_seconds} 秒，"
+                    f"已跳过 {len(item_ids) - index} 个商品"
+                )
+                logger.warning(f"【{cookie_id}】擦亮批量任务中断：{aborted_reason}")
+                break
+
             result = await polish_item(session, cookies_str, item_id)
             cookies_str = result["cookies_str"]
 
@@ -160,6 +173,16 @@ async def polish_account_items(
                 success += 1
             else:
                 failed += 1
+                if risk_control.is_risk_control_error(result["message"]):
+                    guard.trip(f"商品擦亮: {result['message'][:120]}")
+                    aborted_reason = f"命中平台风控，已跳过剩余商品"
+                    details.append({
+                        "item_id": item_id,
+                        "success": False,
+                        "message": result["message"],
+                    })
+                    logger.warning(f"【{cookie_id}】擦亮命中平台风控，中断批量任务")
+                    break
             details.append({
                 "item_id": item_id,
                 "success": result["success"],
@@ -172,11 +195,13 @@ async def polish_account_items(
 
     logger.info(
         f"【{cookie_id}】商品擦亮完成: 共 {len(item_ids)} 个，成功 {success}，失败 {failed}"
+        + (f"（{aborted_reason}）" if aborted_reason else "")
     )
     return {
         "total": len(item_ids),
         "success": success,
         "failed": failed,
+        "aborted_reason": aborted_reason,
         "details": details,
         "cookies_str": cookies_str,
     }

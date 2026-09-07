@@ -41,6 +41,21 @@ class SecureFreeshipping:
             logger.error("免拼发货发货失败，重试次数过多")
             return {"error": "免拼发货发货失败，重试次数过多"}
 
+        # 风控冷却期直接跳过：免拼发货失败不影响卡密已发出的结果，
+        # 冷却结束后可手动补发，持续请求只会延长风控。
+        from utils import risk_control
+        guard = risk_control.registry.get(self.cookie_id)
+        if guard.is_blocked:
+            logger.warning(
+                f"【{self.cookie_id}】自动免拼发货跳过：风控冷却中，"
+                f"剩余 {guard.remaining_seconds} 秒"
+            )
+            return {
+                "error": f"账号风控冷却中，跳过自动免拼发货",
+                "order_id": order_id,
+                "risk_controlled": True,
+            }
+
         # 确保session已创建
         if not self.session:
             raise Exception("Session未创建")
@@ -114,7 +129,20 @@ class SecureFreeshipping:
                 else:
                     error_msg = res_json.get('ret', ['未知错误'])[0] if res_json.get('ret') else '未知错误'
                     logger.warning(f"【{self.cookie_id}】❌ 自动免拼发货失败: {error_msg}")
-                    
+
+                    # 命中平台风控：熔断并立即停止重试，避免无间隔
+                    # 递归重试演变成请求风暴。
+                    if risk_control.is_risk_control_error(str(error_msg)):
+                        guard.trip(f"自动免拼发货: {str(error_msg)[:120]}")
+                        logger.warning(
+                            f"【{self.cookie_id}】自动免拼发货命中平台风控，已熔断并停止重试"
+                        )
+                        return {
+                            "error": f"自动免拼发货触发风控: {error_msg}",
+                            "order_id": order_id,
+                            "risk_controlled": True,
+                        }
+
                     return await self.auto_freeshipping(order_id, item_id, buyer_id, retry_count + 1)
                     
 

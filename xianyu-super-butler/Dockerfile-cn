@@ -81,8 +81,13 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 # 国内构建会卡在这一步直到超时，表现为"镜像构建失败、无法部署"。
 ENV PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright
 
+# 正式版 Chrome（playwright install chrome 走 Google 的 apt 源装系统包）是给
+# 滑块验证用的：阿里 nc 会识破 Playwright 自带 Chromium（Chrome for Testing）
+# 的指纹，连真人手动拖动都判失败 —— 没有 Chrome 时容器里滑块几乎必挂。
+# Chromium 保留作兜底与扫码登录等非风控场景。dl.google.com 在国内一般可达。
 RUN playwright install-deps chromium && \
     playwright install chromium && \
+    playwright install chrome && \
     mkdir -p /app/logs /app/data /app/backups /app/static/uploads/images && \
     chmod 777 /app/logs /app/data /app/backups /app/static/uploads /app/static/uploads/images && \
     chmod +x /app/entrypoint.sh
