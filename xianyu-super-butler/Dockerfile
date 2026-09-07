@@ -61,8 +61,13 @@ COPY --from=builder /app /app
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
+# 正式版 Chrome（playwright install chrome 走 Google 的 apt 源装系统包）是给
+# 滑块验证用的：阿里 nc 会识破 Playwright 自带 Chromium（Chrome for Testing）
+# 的指纹，连真人手动拖动都判失败。dl.google.com 可达性随网络环境差异很大，
+# 失败时降级跳过而不是中断整个构建 —— 回退行为与不装 Chrome 时一致。
 RUN playwright install-deps chromium && \
     playwright install chromium && \
+    (playwright install chrome || echo "[build] 正式版 Chrome 安装失败（Google 源不可达），滑块将回退 Chromium") && \
     mkdir -p /app/logs /app/data /app/backups /app/static/uploads/images && \
     chmod 777 /app/logs /app/data /app/backups /app/static/uploads /app/static/uploads/images && \
     chmod +x /app/entrypoint.sh

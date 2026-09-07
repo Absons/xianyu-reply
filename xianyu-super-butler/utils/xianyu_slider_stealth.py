@@ -521,14 +521,19 @@ class XianyuSliderStealth:
             # Docker 部署就过不了滑块」的根因，所以只作最后的兜底。
             # Edge 是给没装 Chrome 的 Windows 机器准备的：系统必带，零安装成本。
             self.context = None
-            self._browser_channel = None
+            self._browser_channel = 'chromium'
             last_channel_error = None
             for channel, channel_label in (('chrome', 'Chrome'), ('msedge', 'Edge')):
-                # 不同品牌浏览器共用一个 profile 目录会互相污染，各用各的
-                channel_dir = user_data_dir if channel == 'chrome' else f"{user_data_dir}_{channel}"
-                os.makedirs(channel_dir, exist_ok=True)
-                self._clean_singleton_lock_files(channel_dir)
+                # 不同品牌浏览器的 profile 互不兼容，共用目录会互相污染，
+                # 各用各的。chrome 沿用主目录（上方已建好）。
+                if channel == 'chrome':
+                    channel_dir = user_data_dir
+                else:
+                    channel_dir = f"{user_data_dir}_{channel}"
                 try:
+                    if channel != 'chrome':
+                        os.makedirs(channel_dir, exist_ok=True)
+                        self._clean_singleton_lock_files(channel_dir)
                     self.context = self.playwright.chromium.launch_persistent_context(
                         channel_dir,
                         channel=channel,
@@ -541,6 +546,12 @@ class XianyuSliderStealth:
                     logger.info(f"【{self.pure_user_id}】已启动系统{channel_label}（channel={channel}，持久化目录）")
                     break
                 except Exception as channel_error:
+                    # 失败原因必须落日志：静默切下一个渠道会让「profile 被
+                    # 上次实例锁住」这类临时故障完全无从排查
+                    logger.warning(
+                        f"【{self.pure_user_id}】{channel_label}（channel={channel}）"
+                        f"启动失败: {channel_error}"
+                    )
                     last_channel_error = channel_error
 
             if self.context is None:
@@ -548,9 +559,14 @@ class XianyuSliderStealth:
                 # 仍用持久化上下文：一次性 context 没有历史 profile，指纹更假。
                 # Patchright 在这里尤其重要 —— 它补上了 Chromium 相对正式版
                 # Chrome 缺失的那部分伪装。
-                chrome_error = last_channel_error or Exception('无可用的品牌浏览器')
+                # Chromium 写入 profile 的组件/缓存版本与正式版 Chrome 不兼容，
+                # 必须独立目录，否则 Chrome 恢复后读到会互相污染。
+                chromium_dir = f"{user_data_dir}_chromium"
+                os.makedirs(chromium_dir, exist_ok=True)
+                self._clean_singleton_lock_files(chromium_dir)
                 logger.warning(
-                    f"【{self.pure_user_id}】系统 Chrome/Edge 均不可用（{chrome_error}），"
+                    f"【{self.pure_user_id}】系统 Chrome/Edge 均不可用"
+                    f"（{last_channel_error or '无可用品牌浏览器'}），"
                     f"回退 Chromium（引擎: {getattr(self, '_stealth_engine', 'playwright')}）"
                 )
                 fallback_options = dict(context_options)
@@ -564,7 +580,7 @@ class XianyuSliderStealth:
                     logger.info(f"【{self.pure_user_id}】使用 Chromium: {executable_path}")
                 try:
                     self.context = self.playwright.chromium.launch_persistent_context(
-                        user_data_dir,
+                        chromium_dir,
                         headless=self.headless,
                         args=launch_args,
                         **fallback_options,
@@ -606,22 +622,37 @@ class XianyuSliderStealth:
             logger.info(f"【{self.pure_user_id}】添加反检测脚本...")
             self.page.add_init_script(self._get_stealth_script(browser_features))
 
-            # 无头模式的 UA 泄漏修复：Chromium 无头时 navigator.userAgent 和
-            # 请求头都带 "HeadlessChrome" 字样，是最直白的机器人标志。Xvfb
-            # 正常时走有头模式不受影响；只有回退到无头时才需要这里用 CDP
-            # 覆盖成同一内核版本的标准串（只去掉 Headless 前缀，Client Hints
-            # 与内核版本保持一致，不会产生新的矛盾指纹）。
+            # 无头模式的 UA 泄漏修复：无头时 navigator.userAgent 和请求头都带
+            # "HeadlessChrome"（Edge 为 "HeadlessEdg"）字样，是最直白的机器人
+            # 标志。Xvfb 正常时走有头模式不受影响；只有回退到无头时才需要这
+            # 里覆盖成同一内核版本的标准串（只去掉 Headless 前缀，内核版本与
+            # Client Hints 保持一致，不会产生新的矛盾指纹）。
             if self.headless:
                 try:
                     native_ua = self.page.evaluate('navigator.userAgent')
-                    if 'HeadlessChrome' in native_ua:
-                        fixed_ua = native_ua.replace('HeadlessChrome', 'Chrome')
-                        cdp_session = self.context.new_cdp_session(self.page)
-                        cdp_session.send(
-                            'Network.setUserAgentOverride', {'userAgent': fixed_ua}
+                    marker = next(
+                        (m for m in ('HeadlessChrome', 'HeadlessEdg') if m in native_ua),
+                        None,
+                    )
+                    if marker:
+                        fixed_ua = native_ua.replace(marker, marker.replace('Headless', ''))
+                        # CDP 覆盖请求头与 JS 环境，对当前已存在的每个页面生效
+                        for existing_page in self.context.pages:
+                            try:
+                                self.context.new_cdp_session(existing_page).send(
+                                    'Network.setUserAgentOverride', {'userAgent': fixed_ua}
+                                )
+                            except Exception:
+                                continue
+                        # init script 兜底：会话期间新开/重新导航的页面也拿到
+                        # 修正后的 navigator.userAgent
+                        self.page.add_init_script(
+                            "try { Object.defineProperty(navigator, 'userAgent', "
+                            f"{{ get: () => {json.dumps(fixed_ua)}, configurable: true }}); "
+                            "} catch (e) {}"
                         )
                         logger.info(
-                            f"【{self.pure_user_id}】已修正无头 UA（去除 HeadlessChrome 标记）"
+                            f"【{self.pure_user_id}】已修正无头 UA（去除 {marker} 标记）"
                         )
                 except Exception as ua_error:
                     logger.warning(

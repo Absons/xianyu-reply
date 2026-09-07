@@ -151,7 +151,9 @@ async def polish_account_items(
     guard = risk_control.registry.get(cookie_id)
     success = 0
     failed = 0
-    aborted_reason = ""
+    skipped = 0
+    # 中断信息（结构化）：{"reason": "cooldown"|"risk", "skipped": n, "message": str}
+    aborted: Dict[str, Any] = {}
     details: List[Dict[str, Any]] = []
 
     async with aiohttp.ClientSession() as session:
@@ -159,11 +161,13 @@ async def polish_account_items(
             # 命中风控后立即中断整批：擦亮是纯增益操作，
             # 继续打剩余商品只会延长风控时间。
             if guard.is_blocked:
-                aborted_reason = (
-                    f"账号风控冷却中，剩余 {guard.remaining_seconds} 秒，"
-                    f"已跳过 {len(item_ids) - index} 个商品"
-                )
-                logger.warning(f"【{cookie_id}】擦亮批量任务中断：{aborted_reason}")
+                skipped = len(item_ids) - index
+                aborted = {
+                    "reason": "cooldown",
+                    "skipped": skipped,
+                    "message": f"{risk_control.cooldown_message(cookie_id)}，已跳过 {skipped} 个商品",
+                }
+                logger.warning(f"【{cookie_id}】擦亮批量任务中断：{aborted['message']}")
                 break
 
             result = await polish_item(session, cookies_str, item_id)
@@ -171,37 +175,44 @@ async def polish_account_items(
 
             if result["success"]:
                 success += 1
+                # 请求被平台正常受理，说明账号未处于风控状态
+                guard.reset()
             else:
                 failed += 1
-                if risk_control.is_risk_control_error(result["message"]):
-                    guard.trip(f"商品擦亮: {result['message'][:120]}")
-                    aborted_reason = f"命中平台风控，已跳过剩余商品"
-                    details.append({
-                        "item_id": item_id,
-                        "success": False,
-                        "message": result["message"],
-                    })
-                    logger.warning(f"【{cookie_id}】擦亮命中平台风控，中断批量任务")
-                    break
+
             details.append({
                 "item_id": item_id,
                 "success": result["success"],
                 "message": result["message"],
             })
 
+            # 命中平台风控：熔断并中断剩余商品（触发风控的那条已计入 details）
+            if not result["success"] and risk_control.trip_if_risk_error(
+                    cookie_id, result["message"], "商品擦亮"):
+                skipped = len(item_ids) - index - 1
+                aborted = {
+                    "reason": "risk",
+                    "skipped": skipped,
+                    "message": "命中平台风控，已中断批量擦亮",
+                }
+                logger.warning(f"【{cookie_id}】擦亮命中平台风控，中断批量任务")
+                break
+
             # 平台对擦亮有频控，逐个之间留间隔
             if interval and index < len(item_ids) - 1:
                 await asyncio.sleep(interval)
 
     logger.info(
-        f"【{cookie_id}】商品擦亮完成: 共 {len(item_ids)} 个，成功 {success}，失败 {failed}"
-        + (f"（{aborted_reason}）" if aborted_reason else "")
+        f"【{cookie_id}】商品擦亮完成: 共 {len(item_ids)} 个，成功 {success}，"
+        f"失败 {failed}"
+        + (f"，跳过 {skipped} 个（{aborted['message']}）" if aborted else "")
     )
     return {
         "total": len(item_ids),
         "success": success,
         "failed": failed,
-        "aborted_reason": aborted_reason,
+        "skipped": skipped,
+        "aborted": aborted,
         "details": details,
         "cookies_str": cookies_str,
     }

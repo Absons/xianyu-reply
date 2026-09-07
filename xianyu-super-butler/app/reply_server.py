@@ -9231,7 +9231,7 @@ async def polish_items(
         user_cookies = {cookie_id: user_cookies[cookie_id]}
 
     targets = [i.strip() for i in str(item_ids or '').split(',') if i.strip()] or None
-    summary = {'total': 0, 'success': 0, 'failed': 0, 'accounts': {}}
+    summary = {'total': 0, 'success': 0, 'failed': 0, 'skipped': 0, 'accounts': {}}
 
     for cid, cookies_str in user_cookies.items():
         if not cookies_str:
@@ -9246,21 +9246,32 @@ async def polish_items(
         summary['total'] += res['total']
         summary['success'] += res['success']
         summary['failed'] += res['failed']
+        summary['skipped'] += res.get('skipped', 0)
         summary['accounts'][cid] = {
             'total': res['total'],
             'success': res['success'],
             'failed': res['failed'],
+            'skipped': res.get('skipped', 0),
+            'aborted': res.get('aborted') or None,
             'details': res['details'],
         }
 
-    log_with_user(
-        'info',
-        f"商品擦亮完成: 共 {summary['total']} 个，成功 {summary['success']}，失败 {summary['failed']}",
-        current_user,
+    message = (
+        f"擦亮完成: 共 {summary['total']} 个，成功 {summary['success']}，"
+        f"失败 {summary['failed']}"
     )
+    if summary['skipped']:
+        # 有中断时必须让用户看到原因，否则数字对不上会被当成丢失
+        reasons = {
+            acc['aborted']['message']
+            for acc in summary['accounts'].values()
+            if isinstance(acc, dict) and acc.get('aborted')
+        }
+        message += f"，跳过 {summary['skipped']} 个（{'；'.join(reasons) or '风控中断'}）"
+    log_with_user('info', message, current_user)
     return JSONResponse({
         'success': True,
-        'message': f"擦亮完成: 共 {summary['total']} 个，成功 {summary['success']}，失败 {summary['failed']}",
+        'message': message,
         'summary': summary,
     })
 

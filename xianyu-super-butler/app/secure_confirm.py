@@ -180,10 +180,8 @@ class SecureConfirm:
 
                     # 命中平台风控：熔断并立即停止重试。失败分支原本是不带
                     # 间隔的直接递归重试，风控场景下这属于最高危的请求风暴。
-                    if risk_control.is_risk_control_error(str(error_msg)):
-                        risk_control.registry.get(self.cookie_id).trip(
-                            f"自动确认发货: {str(error_msg)[:120]}"
-                        )
+                    if risk_control.trip_if_risk_error(
+                            self.cookie_id, error_msg, "自动确认发货"):
                         logger.warning(
                             f"【{self.cookie_id}】自动确认发货命中平台风控，已熔断并停止重试"
                         )

@@ -84,10 +84,11 @@ ENV PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright
 # 正式版 Chrome（playwright install chrome 走 Google 的 apt 源装系统包）是给
 # 滑块验证用的：阿里 nc 会识破 Playwright 自带 Chromium（Chrome for Testing）
 # 的指纹，连真人手动拖动都判失败 —— 没有 Chrome 时容器里滑块几乎必挂。
-# Chromium 保留作兜底与扫码登录等非风控场景。dl.google.com 在国内一般可达。
+# Chromium 保留作兜底与扫码登录等非风控场景。PLAYWRIGHT_DOWNLOAD_HOST 镜像
+# 不覆盖系统包源，dl.google.com 不可达时降级跳过而不是中断整个构建。
 RUN playwright install-deps chromium && \
     playwright install chromium && \
-    playwright install chrome && \
+    (playwright install chrome || echo "[build] 正式版 Chrome 安装失败（Google 源不可达），滑块将回退 Chromium") && \
     mkdir -p /app/logs /app/data /app/backups /app/static/uploads/images && \
     chmod 777 /app/logs /app/data /app/backups /app/static/uploads /app/static/uploads/images && \
     chmod +x /app/entrypoint.sh

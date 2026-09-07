@@ -35,26 +35,26 @@ class SecureFreeshipping:
         except Exception as e:
             logger.error(f"【{self.cookie_id}】更新Cookie到数据库失败: {self._safe_str(e)}")
 
+    def _risk_skip_result(self, reason_msg: str, order_id) -> dict:
+        """风控早退/熔断的统一返回结构。调用方按 risk_controlled 识别可补发场景。"""
+        return {"error": reason_msg, "order_id": order_id, "risk_controlled": True}
+
     async def auto_freeshipping(self, order_id, item_id, buyer_id, retry_count=0):
         """自动免拼发货 - 加密版本"""
         if retry_count >= 4:  # 最多重试3次
             logger.error("免拼发货发货失败，重试次数过多")
-            return {"error": "免拼发货发货失败，重试次数过多"}
+            return {"error": "免拼发货发货失败，重试次数过多", "order_id": order_id}
 
         # 风控冷却期直接跳过：免拼发货失败不影响卡密已发出的结果，
         # 冷却结束后可手动补发，持续请求只会延长风控。
         from utils import risk_control
         guard = risk_control.registry.get(self.cookie_id)
         if guard.is_blocked:
-            logger.warning(
-                f"【{self.cookie_id}】自动免拼发货跳过：风控冷却中，"
-                f"剩余 {guard.remaining_seconds} 秒"
+            cooldown_msg = risk_control.cooldown_message(self.cookie_id)
+            logger.warning(f"【{self.cookie_id}】自动免拼发货跳过：{cooldown_msg}")
+            return self._risk_skip_result(
+                f"{cooldown_msg}，跳过自动免拼发货", order_id
             )
-            return {
-                "error": f"账号风控冷却中，跳过自动免拼发货",
-                "order_id": order_id,
-                "risk_controlled": True,
-            }
 
         # 确保session已创建
         if not self.session:
@@ -125,6 +125,7 @@ class SecureFreeshipping:
                 # 检查响应结果
                 if res_json.get('ret') and res_json['ret'][0] == 'SUCCESS::调用成功':
                     logger.info(f"【{self.cookie_id}】✅ 自动免拼发货成功，订单ID: {order_id}")
+                    guard.reset()
                     return {"success": True, "order_id": order_id}
                 else:
                     error_msg = res_json.get('ret', ['未知错误'])[0] if res_json.get('ret') else '未知错误'
@@ -132,17 +133,18 @@ class SecureFreeshipping:
 
                     # 命中平台风控：熔断并立即停止重试，避免无间隔
                     # 递归重试演变成请求风暴。
-                    if risk_control.is_risk_control_error(str(error_msg)):
-                        guard.trip(f"自动免拼发货: {str(error_msg)[:120]}")
+                    if risk_control.trip_if_risk_error(
+                            self.cookie_id, error_msg, "自动免拼发货"):
                         logger.warning(
                             f"【{self.cookie_id}】自动免拼发货命中平台风控，已熔断并停止重试"
                         )
-                        return {
-                            "error": f"自动免拼发货触发风控: {error_msg}",
-                            "order_id": order_id,
-                            "risk_controlled": True,
-                        }
+                        return self._risk_skip_result(
+                            f"自动免拼发货触发风控: {error_msg}", order_id
+                        )
 
+                    # 非风控错误（如签名令牌临时过期）也不能零间隔连发，
+                    # 至少留出间隔再重试。
+                    await asyncio.sleep(1.0)
                     return await self.auto_freeshipping(order_id, item_id, buyer_id, retry_count + 1)
                     
 

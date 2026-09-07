@@ -43,6 +43,26 @@ def is_risk_control_error(message) -> bool:
     return any(marker in text for marker in RISK_CONTROL_MARKERS)
 
 
+def trip_if_risk_error(cookie_id: str, message, context: str = "") -> bool:
+    """命中风控特征时熔断该账号，返回是否命中。
+
+    mtop 的风控错误放在响应体 ``ret`` 里正常返回（不抛异常），所以
+    :func:`guarded_call` 的异常路径覆盖不到它们 —— 各自动操作的失败分支
+    应统一用这个助手做熔断判断，避免每个调用点手抄一份 trip 逻辑。
+    """
+    if not is_risk_control_error(message):
+        return False
+    reason = str(message)[:120]
+    registry.get(cookie_id).trip(f"{context}: {reason}" if context else reason)
+    return True
+
+
+def cooldown_message(cookie_id: str) -> str:
+    """生成冷却期提示文案。熔断跳过的返回值/日志统一用它，避免各处手拼。"""
+    guard = registry.get(cookie_id)
+    return f"账号风控冷却中，剩余 {guard.remaining_seconds} 秒"
+
+
 class AccountGuard:
     """单个账号的熔断状态与限流令牌桶。"""
 

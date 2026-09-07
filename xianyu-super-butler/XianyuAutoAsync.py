@@ -7419,10 +7419,16 @@ class XianyuLive:
                             self.cookies_str = new_cookies
 
                         if result['total']:
-                            logger.info(
+                            polish_msg = (
                                 f"【{self.cookie_id}】定时擦亮完成: 共 {result['total']} 个商品，"
                                 f"成功 {result['success']}，失败 {result['failed']}"
                             )
+                            if result.get('aborted'):
+                                polish_msg += (
+                                    f"，跳过 {result.get('skipped', 0)} 个"
+                                    f"（{result['aborted']['message']}）"
+                                )
+                            logger.info(polish_msg)
                     except asyncio.CancelledError:
                         logger.info(f"【{self.cookie_id}】商品擦亮被取消")
                         raise
