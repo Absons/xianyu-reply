@@ -58,6 +58,9 @@ LABEL maintainer="23Star" \
       repository="https://github.com/23Star/xianyu-super-butler" \
       author="23Star"
 
+# nodejs 必须装在 runtime 层：execjs（Cookie 签名）没有 JS 运行时会让
+# uvicorn 直接起不来（Could not find an available JavaScript runtime）。
+# 前端构建阶段的 node:20-alpine 与运行镜像无关，别被它误导。
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         tzdata \
@@ -68,7 +71,8 @@ RUN apt-get update && \
         libgl1 \
         libglib2.0-0 \
         xvfb \
-        x11-utils nodejs && \
+        x11-utils \
+        nodejs && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /opt/venv /opt/venv
