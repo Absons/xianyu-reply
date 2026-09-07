@@ -1,0 +1,19 @@
+# 敏感信息与本地数据（含 Cookie、API Key、聊天记录，切勿提交）
+.env
+*.env
+XianyuAutoAgent/data/
+xianyu-super-butler/data/
+xianyu-super-butler/logs/
+xianyu-super-butler/backups/
+xianyu-super-butler/static/uploads/
+xianyu-super-butler/captcha/
+
+# 会话与本地配置
+.claude/
+
+# 通用忽略
+__pycache__/
+*.pyc
+node_modules/
+.DS_Store
+*.log

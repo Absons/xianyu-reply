@@ -1,0 +1,19 @@
+version: '3'
+
+services:
+    XianyuAutoAgent:
+        image: shaxiu/xianyuautoagent:latest
+        container_name: xianyuautoagent
+        restart: always
+        volumes:
+            - ./data:/app/data
+            - ./prompts:/app/prompts
+            - ./.env:/app/.env
+        environment:
+            - TZ=Asia/Shanghai
+        networks:
+            - xianyu-network
+
+networks:
+    xianyu-network:
+        driver: bridge
