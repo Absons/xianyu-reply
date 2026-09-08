@@ -7874,9 +7874,12 @@ class XianyuLive:
                             await api.require_flower(order_id)
                             flowered += 1
                             logger.info(f"【{self.cookie_id}】订单 {order_id} 已发送求花")
+                            self._auto_flowered_orders.add(order_id)
                         except SellerApiError as exc:
                             logger.warning(f"【{self.cookie_id}】订单 {order_id} 求花失败: {exc}")
-                    self._auto_flowered_orders.add(order_id)
+                    # 只有真正发过求花才标记。未到求花窗口的订单（如买家
+                    # 还没评价，平台不返回 REQUIRE_FLOWER）不能标记，否则
+                    # 买家事后评价、订单变得可求花时，这里会永久跳过它。
 
             if api.cookies_str and api.cookies_str != self.cookies_str:
                 self.cookies_str = api.cookies_str
