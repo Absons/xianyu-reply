@@ -3,8 +3,13 @@
 擦亮会把商品重新推到搜索和推荐列表前面，是平台提供的免费曝光手段。
 卖家手动擦亮几十个商品很费时，这里做成定时任务批量执行。
 
-接口 ``mtop.taobao.idle.item.polish`` 走 H5 端签名（版本是 2.0，不是 1.0），
-每个商品每天能擦亮的次数由平台限制，重复调用会返回业务错误而非报错。
+接口 ``mtop.taobao.idle.item.polish`` 走 H5 端签名。
+
+注意 URL 路径版本必须是 **1.0**：路径 2.0 是个只返回成功不做事的空壳
+（实测对已下架商品也返回 ``SUCCESS + exposure: true``，擦了等于没擦）；
+路径 1.0 会做真实验证（已下架报 ``FAIL_BIZ_UNSUPPORTED_ITEM_STATUS``、
+当日已擦亮报 ``POLISH_DUPLICATE``/``POLISH_AGAIN``）。``v`` 参数保持 2.0，
+与上游 9100 星项目一致。
 """
 
 import asyncio
@@ -19,7 +24,7 @@ from utils.xianyu_utils import generate_sign, trans_cookies
 
 
 POLISH_API = "mtop.taobao.idle.item.polish"
-POLISH_URL = f"https://h5api.m.goofish.com/h5/{POLISH_API}/2.0/"
+POLISH_URL = f"https://h5api.m.goofish.com/h5/{POLISH_API}/1.0/"
 APP_KEY = "34839810"
 
 USER_AGENT = (
@@ -57,7 +62,7 @@ async def polish_item(
         "appKey": APP_KEY,
         "t": timestamp,
         "sign": generate_sign(timestamp, token, data_val),
-        # 该接口是 2.0，传 1.0 会报接口不存在
+        # v 参数用 2.0；URL 路径版本才是真正的路由开关（见文件头说明）
         "v": "2.0",
         "type": "originaljson",
         "accountSite": "xianyu",
@@ -66,6 +71,8 @@ async def polish_item(
         "api": POLISH_API,
         "sessionOption": "AutoLoginOnly",
         "spm_cnt": "a21ybx.item.0.0",
+        "spm_pre": "a21ybx.personal.feeds.1.42f86ac21eZ9zd",
+        "log_id": "42f86ac21eZ9zd",
     }
     headers = {
         "accept": "application/json",
@@ -73,6 +80,12 @@ async def polish_item(
         "origin": "https://www.goofish.com",
         "referer": "https://www.goofish.com/",
         "user-agent": USER_AGENT,
+        "sec-ch-ua": '"Google Chrome";v="141", "Not=A?Brand";v="8", "Not A(Brand)";v="141"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Win32"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-site",
         "cookie": cookies_str.replace("\n", "").replace("\r", ""),
     }
 
@@ -91,7 +104,16 @@ async def polish_item(
 
     ret_list = result.get("ret", []) if isinstance(result, dict) else []
     message = "; ".join(str(v) for v in ret_list) or "未知响应"
-    success = any("SUCCESS" in str(v) for v in ret_list)
+    ret_text = message
+    # 「一天只能擦亮一次」就是当日擦亮已达成，视为成功（与上游一致）。
+    # 路径 1.0 对这种情况返回 FAIL_BIZ_* 业务错误而非 SUCCESS。
+    duplicate = any(
+        marker in ret_text
+        for marker in ("POLISH_DUPLICATE", "POLISH_AGAIN", "一天只能擦亮一次", "已经擦亮过")
+    )
+    success = duplicate or any("SUCCESS" in str(v) for v in ret_list)
+    if duplicate and "SUCCESS" not in ret_text:
+        message = "今日已擦亮过（视为成功）"
     return {"success": success, "message": message, "cookies_str": cookies_str}
 
 
