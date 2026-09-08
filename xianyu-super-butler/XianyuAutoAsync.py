@@ -10397,6 +10397,30 @@ class XianyuLive:
                     item_id, chat_id, msg_time
                 )
                 return
+
+            # 确认收货/评价提醒必须在「系统事件绕过」判断【之前】处理：
+            # 这两类文本都命中 _is_system_or_order_event，放在后面的话
+            # 提前 return 会让它们变成永远执行不到的死代码 —— 实测买家
+            # 确认收货后求花/致谢从不触发，根因就在这个顺序上。
+            if send_message == '[买家确认收货，交易成功]':
+                logger.info(f'[{msg_time}] 【{self.cookie_id}】交易完成，触发买家互动')
+                await self.send_post_receipt_thanks(websocket, chat_id, send_user_id)
+                await self.trigger_buyer_interactions_now('买家确认收货')
+                return
+            if send_message == '[你已确认收货，交易成功]':
+                # 买家侧视角的确认收货文案（本账号作为买家时）。同样要在
+                # 系统事件 return 之前处理，理由同上。
+                logger.info(f'[{msg_time}] 【{self.cookie_id}】确认收货，触发买家互动')
+                await self.send_post_receipt_thanks(websocket, chat_id, send_user_id)
+                await self.trigger_buyer_interactions_now('确认收货')
+                return
+            if send_message in ('快给ta一个评价吧~', '快给ta一个评价吧～'):
+                # 闲鱼只在交易完成后才推这条提醒，是个可靠的补充信号：
+                # 万一「交易成功」那条消息漏收，靠它也能触发。触发本身有去重。
+                logger.info(f'[{msg_time}] 【{self.cookie_id}】收到评价提醒，触发买家互动')
+                await self.trigger_buyer_interactions_now('评价提醒')
+                return
+
             if self._is_system_or_order_event(send_message):
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】系统或订单事件绕过普通自动回复')
                 return
@@ -10408,35 +10432,18 @@ class XianyuLive:
                 return
             elif send_message == '[不想宝贝被砍价?设置不砍价回复  ]':
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】系统提示信息不处理')
-                return 
+                return
             elif send_message == 'AI正在帮你回复消息，不错过每笔订单':
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】系统提示信息不处理')
-                return 
+                return
             elif send_message == '发来一条消息':
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】系统通知消息不处理')
                 return
             elif send_message == '发来一条新消息':
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】系统通知消息不处理')
                 return
-            elif send_message == '[买家确认收货，交易成功]':
-                logger.info(f'[{msg_time}] 【{self.cookie_id}】交易完成，触发买家互动')
-                await self.send_post_receipt_thanks(websocket, chat_id, send_user_id)
-                await self.trigger_buyer_interactions_now('买家确认收货')
-                return
-            elif send_message == '快给ta一个评价吧~' or send_message == '快给ta一个评价吧～':
-                # 闲鱼只在交易完成后才推这条提醒，是个可靠的补充信号：
-                # 万一「交易成功」那条消息漏收，靠它也能触发。触发本身有去重。
-                logger.info(f'[{msg_time}] 【{self.cookie_id}】收到评价提醒，触发买家互动')
-                await self.send_post_receipt_thanks(websocket, chat_id, send_user_id)
-                await self.trigger_buyer_interactions_now('评价提醒')
-                return
             elif send_message == '卖家人不错？送Ta闲鱼小红花':
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】小红花提醒消息不处理')
-                return
-            elif send_message == '[你已确认收货，交易成功]':
-                logger.info(f'[{msg_time}] 【{self.cookie_id}】确认收货，触发买家互动')
-                await self.send_post_receipt_thanks(websocket, chat_id, send_user_id)
-                await self.trigger_buyer_interactions_now('确认收货')
                 return
             elif send_message == '[你已发货]':
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】发货确认消息不处理')
