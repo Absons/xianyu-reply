@@ -597,6 +597,25 @@ class AIReplyEngine:
                 self._chat_locks[chat_id] = threading.Lock()
             return self._chat_locks[chat_id]
     
+    def _is_managed_peer(self, user_id: str, self_cookie_id: str) -> bool:
+        """判断消息发送者是否为本系统管理的其他账号。
+
+        多账号矩阵/测试时，两个实例会把对方的消息当成买家咨询各自入库、
+        各自生成回复，演变成两个 AI 无限互聊（2026-09-08 双号实测）。
+        自家账号之间的会话必须整体隔离：不生成回复、不写会话记录。
+        """
+        try:
+            from app.db_manager import db_manager
+            with db_manager.lock:
+                cur = db_manager.conn.cursor()
+                cur.execute("SELECT id FROM cookies")
+                managed = {str(r[0]) for r in cur.fetchall()}
+            uid = str(user_id or '')
+            return bool(uid) and uid != str(self_cookie_id) and uid in managed
+        except Exception as exc:
+            logger.debug(f"检查对方是否为管理账号失败: {exc}")
+            return False
+
     def generate_reply(self, message: str, item_info: dict, chat_id: str,
                       cookie_id: str, user_id: str, item_id: str,
                       skip_wait: bool = False) -> Optional[str]:
@@ -605,6 +624,15 @@ class AIReplyEngine:
             return None
         if self.is_system_or_order_event(message):
             logger.info(f"系统/订单事件绕过AI回复: 账号={cookie_id}, chat_id={chat_id}")
+            return None
+
+        # 多账号隔离：对方也是本系统管理的账号时，不生成 AI 回复、
+        # 不写会话记录（否则两个实例的会话上下文互相喂养形成死循环）。
+        if self._is_managed_peer(user_id, cookie_id):
+            logger.info(
+                f"【{cookie_id}】消息来自本系统管理的账号 {user_id}，"
+                f"跳过AI回复与会话记录（多账号隔离）"
+            )
             return None
         
         try:

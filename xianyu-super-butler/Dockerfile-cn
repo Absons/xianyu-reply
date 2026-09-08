@@ -1,4 +1,7 @@
-FROM python:3.11-slim-bookworm AS base
+# 基础镜像走 DaoCloud 国内镜像源：构建机到 Docker Hub 的连通性取决于代理
+# 状态（TUN 模式下尤其不稳定），元数据解析失败会让整个构建挂掉；
+# 基础镜像本身在国内源是直连可达的。
+FROM docker.m.daocloud.io/library/python:3.11-slim-bookworm AS base
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -9,13 +12,13 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-        sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/debian.sources; \
+        sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources; \
     fi && \
     if [ -f /etc/apt/sources.list ]; then \
-        sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list; \
+        sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list; \
     fi
 
-FROM node:20-alpine AS frontend-builder
+FROM docker.m.daocloud.io/library/node:20-alpine AS frontend-builder
 
 WORKDIR /frontend
 RUN npm config set registry https://registry.npmmirror.com

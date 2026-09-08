@@ -1572,6 +1572,18 @@ class XianyuLive:
         if not order_id or not order_status:
             return False
 
+        # 买家侧实例防串号：账号挂在系统里也可能作为买家去别的店铺下单，
+        # 此时它的实例同样会收到「我已拍下/已付款」卡片。不拦截的话，订单
+        # 会以买家侧 cookie_id 写进 orders 表，卖家侧实例发货时就被
+        # 「订单不属于当前账号」拦住（实测订单 3316400330237014951）。
+        # 自己是买家就不可能是这单的卖家，直接跳过。
+        if buyer_id and str(buyer_id) == str(self.cookie_id):
+            logger.info(
+                f"【{self.cookie_id}】订单 {order_id} 的买家是本账号（买家侧卡片），"
+                f"跳过订单快照保存"
+            )
+            return False
+
         try:
             from app.db_manager import db_manager
 
@@ -1728,6 +1740,28 @@ class XianyuLive:
                     from app.db_manager import db_manager
                     item_info = db_manager.get_item_info(self.cookie_id, item_id)
                     if not item_info:
+                        # 商品不在本地库：多半是刚上架、还没轮到定时同步。
+                        # 实测新商品要等到手动「刷新资料」触发实例重启后的
+                        # 立即同步才入库，期间该商品的自动发货会被这里的
+                        # 归属检查拦下且不会补发。所以先实时拉一次平台详情
+                        # 入库，把同步滞后从发货链路上消掉。
+                        logger.info(
+                            f'[{msg_time}] 【{self.cookie_id}】商品 {item_id} 不在本地库，'
+                            f'实时拉取详情入库后再验证归属'
+                        )
+                        live_item = await self.get_item_info(item_id)
+                        if isinstance(live_item, dict) and not live_item.get('error'):
+                            item_do = (live_item.get('data') or {}).get('itemDO') or {}
+                            if item_do:
+                                db_manager.save_item_basic_info(
+                                    self.cookie_id, item_id,
+                                    item_title=str(item_do.get('title') or '') or None,
+                                    item_price=str(item_do.get('price') or '') or None,
+                                    item_image=item_do.get('picUrl') or None,
+                                    item_detail=str(item_do.get('desc') or '') or None,
+                                )
+                            item_info = db_manager.get_item_info(self.cookie_id, item_id)
+                    if not item_info:
                         logger.warning(f'[{msg_time}] 【{self.cookie_id}】❌ 商品 {item_id} 不属于当前账号，跳过自动发货')
                         return
                     logger.warning(f'[{msg_time}] 【{self.cookie_id}】✅ 商品 {item_id} 归属验证通过')
@@ -1748,8 +1782,27 @@ class XianyuLive:
             current_order = db_manager.get_order_by_id(order_id)
             if current_order:
                 if str(current_order.get('cookie_id') or '') != str(self.cookie_id):
-                    logger.error(f'[{msg_time}] 【{self.cookie_id}】订单 {order_id} 不属于当前账号，拒绝自动发货')
-                    return
+                    rec_cookie = str(current_order.get('cookie_id') or '')
+                    rec_buyer = str(current_order.get('buyer_id') or '')
+                    # 商品归属已在上面验证通过（该商品确属当前账号）。若订单
+                    # 记录的买家与消息中的买家一致，说明记录是「买家账号也挂
+                    # 在系统里」时被买家侧实例抢先保存的（实测订单
+                    # 3316400330237014951），订单实际属于当前卖家 —— 纠正归属
+                    # 后继续发货，而不是拒绝。
+                    if (item_id and item_id != "未知商品"
+                            and rec_buyer and rec_buyer == str(send_user_id)):
+                        logger.warning(
+                            f'[{msg_time}] 【{self.cookie_id}】订单 {order_id} 原记录在账号 '
+                            f'{rec_cookie} 名下（买家侧实例抢先保存），商品归属验证已通过，'
+                            f'纠正为当前账号后继续发货'
+                        )
+                        db_manager.insert_or_update_order(
+                            order_id=order_id, cookie_id=self.cookie_id
+                        )
+                        current_order['cookie_id'] = self.cookie_id
+                    else:
+                        logger.error(f'[{msg_time}] 【{self.cookie_id}】订单 {order_id} 不属于当前账号，拒绝自动发货')
+                        return
                 if current_order.get('item_id') and str(current_order.get('item_id')) != str(item_id):
                     logger.error(f'[{msg_time}] 【{self.cookie_id}】订单 {order_id} 商品归属不一致，拒绝自动发货')
                     return
@@ -9590,6 +9643,32 @@ class XianyuLive:
                     f"[{msg_time}] 【{self.cookie_id}】消息命中过滤规则“{matched_filter}”，跳过自动回复"
                 )
                 return
+
+            # 防自嗨：聊天对象也是本系统管理的账号时（多号矩阵/测试互发），
+            # 两个实例的自动回复会形成互相聊天的死循环（实测两个测试号都开
+            # AI 后，发货消息触发双方 AI 无限互聊）。自家账号之间的会话一律
+            # 不自动回复，需要验证流程时人工在网页端发消息。
+            try:
+                with db_manager.lock:
+                    _cur = db_manager.conn.cursor()
+                    _cur.execute("SELECT id FROM cookies")
+                    managed_ids = {str(r[0]) for r in _cur.fetchall()}
+                if str(send_user_id) in managed_ids and str(send_user_id) != str(self.cookie_id):
+                    self._add_reply_decision_log(
+                        message_data,
+                        **log_context,
+                        process_status="skipped",
+                        decision_reason="sender_is_managed_account",
+                        reply_strategy="none",
+                        send_status="unknown",
+                    )
+                    logger.info(
+                        f"[{msg_time}] 【{self.cookie_id}】消息来自本系统管理的账号 "
+                        f"{send_user_id}，跳过自动回复（防止多账号互聊）"
+                    )
+                    return
+            except Exception as managed_check_error:
+                logger.debug(f"检查对方是否为管理账号失败: {self._safe_str(managed_check_error)}")
 
             # 自动回复消息
             if not AUTO_REPLY.get('enabled', True):
