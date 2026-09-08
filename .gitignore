@@ -1,6 +1,7 @@
 # 敏感信息与本地数据（含 Cookie、API Key、聊天记录，切勿提交）
 .env
 *.env
+.idea/
 XianyuAutoAgent/data/
 xianyu-super-butler/data/
 xianyu-super-butler/logs/
