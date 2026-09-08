@@ -7822,11 +7822,27 @@ class XianyuLive:
 
         asyncio.create_task(run())
 
+    # 求花只针对该天数内完结的订单。求花消息本质是向买家开口要小红花，
+    # 对几个月前完结的老订单补发只会显得突兀；窗口内漏掉的由轮询兜底。
+    FLOWER_ASK_WINDOW_DAYS = int(os.getenv('FLOWER_ASK_WINDOW_DAYS', '3'))
+
+    @staticmethod
+    def _parse_finish_ts(finish_time):
+        """把订单完结时间的常见格式解析成时间戳，失败返回 None。"""
+        if not finish_time:
+            return None
+        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
+            try:
+                return time.mktime(time.strptime(str(finish_time).strip(), fmt))
+            except (ValueError, TypeError):
+                continue
+        return None
+
     async def _run_buyer_interactions(self, rate_on: bool, flower_on: bool) -> dict:
         """对已完结订单执行评价和求花。
 
-        判定依据来自订单接口：``sellerRateStatus`` 为 4 表示卖家已评价，
-        ``REQUIRE_FLOWER`` 出现在可执行动作里才说明该单能求花。
+        判定依据来自订单接口：``sellerRateStatus`` 为 4 表示卖家已评价；
+        求花不依赖评价，完结即发（只限 ``FLOWER_ASK_WINDOW_DAYS`` 天内完结的单）。
         """
         from app.db_manager import db_manager
         from utils.xianyu_seller_api import (
@@ -7869,17 +7885,24 @@ class XianyuLive:
                     self._auto_rated_orders.add(order_id)
 
                 if flower_on and order_id not in self._auto_flowered_orders:
-                    if 'REQUIRE_FLOWER' in actions:
+                    # 求花不依赖买家评价：require_flower 交易完结后即可调用
+                    # （接口说明如此）。原来依赖动作列表出现 REQUIRE_FLOWER，
+                    # 实测该动作在已完成订单里从不出现，求花因此永远不会触发。
+                    # 只对近期完结的单求花，避免对几个月前的老买家开口。
+                    finish_ts = self._parse_finish_ts(parsed.get('finish_time'))
+                    within_window = finish_ts is not None and (
+                        time.time() - finish_ts <= self.FLOWER_ASK_WINDOW_DAYS * 86400
+                    )
+                    if within_window:
                         try:
                             await api.require_flower(order_id)
                             flowered += 1
                             logger.info(f"【{self.cookie_id}】订单 {order_id} 已发送求花")
-                            self._auto_flowered_orders.add(order_id)
                         except SellerApiError as exc:
-                            logger.warning(f"【{self.cookie_id}】订单 {order_id} 求花失败: {exc}")
-                    # 只有真正发过求花才标记。未到求花窗口的订单（如买家
-                    # 还没评价，平台不返回 REQUIRE_FLOWER）不能标记，否则
-                    # 买家事后评价、订单变得可求花时，这里会永久跳过它。
+                            logger.warning(f"【{self.cookie_id}】订单 {order_id} 求花未成功: {exc}")
+                        # 无论成败都只尝试一次：反复重试等于反复骚扰买家，
+                        # 平台拒绝（如已求过）重试也不会成功
+                        self._auto_flowered_orders.add(order_id)
 
             if api.cookies_str and api.cookies_str != self.cookies_str:
                 self.cookies_str = api.cookies_str
